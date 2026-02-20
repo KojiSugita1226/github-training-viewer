@@ -319,6 +319,20 @@ body {
     color: #1a1a2e;
 }
 .side-panel.open { right: 0; }
+#worksheetPanel { width: 680px; right: -700px; }
+#worksheetPanel.open { right: 0; }
+/* === AI Feedback === */
+.feedback-btn { padding:3px 10px; background:linear-gradient(135deg,#7c3aed,#a855f7); color:#fff; border:none; border-radius:6px; font-size:11px; font-weight:600; cursor:pointer; transition:all 0.2s; display:inline-flex; align-items:center; gap:4px; }
+.feedback-btn:hover { transform:translateY(-1px); box-shadow:0 4px 12px rgba(124,58,237,0.3); }
+.feedback-btn:disabled { opacity:0.5; cursor:not-allowed; transform:none; box-shadow:none; }
+.feedback-btn .fb-spinner { display:inline-block; width:12px; height:12px; border:2px solid rgba(255,255,255,0.3); border-top-color:#fff; border-radius:50%; animation:fbSpin 0.6s linear infinite; }
+@keyframes fbSpin { to { transform:rotate(360deg); } }
+.feedback-area { margin:8px 0; padding:12px; background:linear-gradient(135deg,#f5f3ff,#ede9fe); border-left:3px solid #7c3aed; border-radius:6px; font-size:12px; color:#333; line-height:1.6; white-space:pre-wrap; display:none; }
+.feedback-area.visible { display:block; }
+.feedback-area .fb-header { font-weight:700; color:#7c3aed; margin-bottom:6px; font-size:13px; }
+.overall-feedback-btn { display:block; width:100%; padding:12px; margin-top:12px; background:linear-gradient(135deg,#7c3aed,#a855f7); color:#fff; border:none; border-radius:8px; font-size:14px; font-weight:700; cursor:pointer; transition:all 0.2s; }
+.overall-feedback-btn:hover { box-shadow:0 4px 20px rgba(124,58,237,0.3); transform:translateY(-1px); }
+.overall-feedback-btn:disabled { opacity:0.5; cursor:not-allowed; transform:none; }
 .panel-header {
     padding: 16px 20px;
     border-bottom: 1px solid #eee;
@@ -837,6 +851,7 @@ body {
     <button class="tb-btn" onclick="enterFlashcardMode()">暗記カード</button>
     <button class="tb-btn" data-panel="glossary" onclick="togglePanel('glossary')">用語集 <span class="badge">98</span></button>
     <button class="tb-btn" onclick="enterPresenterMode()">発表者</button>
+    <button class="tb-btn" data-panel="worksheet" onclick="togglePanel('worksheet')">ワークシート</button>
     <button class="tb-btn" onclick="showGuide()">？</button>
     <button class="tb-btn" id="analyticsBtn" onclick="togglePanel('analytics')" data-panel="analytics" style="background:rgba(76,175,80,0.15);border-color:rgba(76,175,80,0.3);color:#4caf50;display:none;">データ出力</button>
   </div>
@@ -879,6 +894,7 @@ body {
 <div class="side-panel" id="notesPanel"></div>
 <div class="side-panel" id="cheatsheetPanel"></div>
 <div class="side-panel" id="analyticsPanel"></div>
+<div class="side-panel" id="worksheetPanel"></div>
 
 <div class="modal-overlay" id="quizModal">
   <div class="quiz-container">
@@ -1006,6 +1022,7 @@ body {
 <!-- Firebase SDK -->
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-functions-compat.js"></script>
 
 <script>
 // === データ（Python から注入） ===
@@ -1239,6 +1256,7 @@ function togglePanel(name) {
         if (name === 'glossary') buildGlossaryPanel();
         if (name === 'notes') { buildNotesPanel(); loadNoteForCurrentSlide(); }
         if (name === 'cheatsheet') buildCheatsheetPanel();
+        if (name === 'worksheet') buildWorksheetPanel();
     }
 }
 
@@ -1799,6 +1817,7 @@ document.addEventListener('keydown', e => {
     if (e.key === 'n' || e.key === 'N') togglePanel('notes');
     if (e.key === 'c' || e.key === 'C') togglePanel('cheatsheet');
     if (e.key === 'f' || e.key === 'F') enterFlashcardMode();
+    if (e.key === 'w' || e.key === 'W') togglePanel('worksheet');
     if (e.key === 'p' || e.key === 'P') {
         if (presenterMode) exitPresenterMode();
         else enterPresenterMode();
@@ -1875,15 +1894,260 @@ const FIREBASE_CONFIG = {
 };
 
 let db = null;
+let functions = null;
 const isFirebaseEnabled = FIREBASE_CONFIG.apiKey !== "";
 if (isFirebaseEnabled) {
     try {
         firebase.initializeApp(FIREBASE_CONFIG);
         db = firebase.firestore();
+        functions = firebase.app().functions('asia-northeast1');
         console.log('[Analytics] Firebase 接続OK');
     } catch (e) {
         console.warn('[Analytics] Firebase 初期化失敗:', e);
     }
+}
+
+// =============================================
+// Worksheet — GitHub運用設計ワークシート
+// =============================================
+
+const WORKSHEET_KEY = 'ghcourse_worksheet';
+const WS_SECTION_LABELS = {
+    overview: '概要',
+    git_basics: 'Git基礎設計',
+    team_dev: 'チーム開発ルール',
+    repo_mgmt: 'リポジトリ管理'
+};
+
+function getWorksheetData() {
+    try { return JSON.parse(localStorage.getItem(WORKSHEET_KEY) || '{}'); }
+    catch { return {}; }
+}
+function saveWorksheetData(data) {
+    localStorage.setItem(WORKSHEET_KEY, JSON.stringify(data));
+}
+
+const CANVAS_FIELDS = [
+    { id: 'ws_team', label: 'チーム・プロジェクト名', placeholder: 'チーム名やプロジェクト名を入力', section: 'overview', rows: 1 },
+    { id: 'ws_members', label: 'メンバー構成', sub: 'Git経験者・未経験者の割合は？', placeholder: '例：5名（Git経験者2名、未経験3名）', section: 'overview', rows: 2 },
+    { id: 'ws_goal', label: 'GitHub導入の目的', sub: 'なぜGitHubでバージョン管理を始めるのか？', placeholder: '現状の課題と導入目的を記入', section: 'overview', rows: 3 },
+    { id: 'ws_repo_structure', label: 'リポジトリ構成', sub: 'どのようなリポジトリを作るか？モノレポ or マルチレポ？', placeholder: '例：プロジェクトごとに1リポジトリ\n・project-frontend\n・project-backend\n・project-docs', section: 'git_basics', rows: 4 },
+    { id: 'ws_branch_strategy', label: 'ブランチ戦略', sub: 'どのブランチモデルを採用するか？（GitHub Flow / Git Flow など）', placeholder: '例：GitHub Flow\n・main: 本番\n・dev: 開発統合\n・feature/*: 機能開発', section: 'git_basics', rows: 5 },
+    { id: 'ws_commit_rules', label: 'コミットルール', sub: 'コミットメッセージの書き方、コミット粒度のルール', placeholder: '例：\nプレフィックス: feat / fix / docs / refactor\n形式: feat: ログイン機能を追加\n粒度: 1機能1コミットを目安', section: 'git_basics', rows: 4 },
+    { id: 'ws_pr_flow', label: 'Pull Requestのルール', sub: 'PRの作成・レビュー・マージの流れ', placeholder: '例：\n・PRテンプレートを使用\n・最低1名のレビュー承認が必要\n・CI通過後にマージ', section: 'team_dev', rows: 4 },
+    { id: 'ws_review_policy', label: 'コードレビュー方針', sub: 'レビューの観点・担当・対応期限', placeholder: '例：\n観点: 動作確認、可読性、セキュリティ\n担当: チームメンバーの持ち回り\n期限: PR作成から24時間以内', section: 'team_dev', rows: 4 },
+    { id: 'ws_issue_management', label: 'Issue管理', sub: 'タスク管理にIssueをどう活用するか？ラベル設計は？', placeholder: '例：\nラベル: bug / feature / docs / question\nテンプレート: バグ報告・機能要望\nProjectボードでカンバン管理', section: 'team_dev', rows: 4 },
+    { id: 'ws_conflict_policy', label: 'コンフリクト対応方針', sub: 'コンフリクトが発生した場合の対処ルール', placeholder: '例：\n・feature作成者が解消責任を持つ\n・不明な場合はチームリーダーに相談\n・定期的にdevからpullして予防', section: 'team_dev', rows: 3 },
+    { id: 'ws_branch_protection', label: 'ブランチ保護ルール', sub: 'main / devブランチにどのような保護を設定するか？', placeholder: '例：\nmain: 直接push禁止、PR必須、レビュー1名以上\ndev: 直接push禁止、PR必須', section: 'repo_mgmt', rows: 4 },
+    { id: 'ws_gitignore', label: '.gitignore設計', sub: 'Git管理対象外にすべきファイルは？', placeholder: '例：\n・.env（環境変数・秘密情報）\n・node_modules/（依存パッケージ）\n・.DS_Store（macOSシステムファイル）\n・*.log（ログファイル）', section: 'repo_mgmt', rows: 4 },
+    { id: 'ws_lfs', label: 'Git LFS対象ファイル', sub: '大容量ファイルをLFSで管理する必要があるか？', placeholder: '例：\n・*.pptx（スライドファイル）\n・*.pdf（ドキュメント）\n・*.zip（アーカイブ）', section: 'repo_mgmt', rows: 3 },
+    { id: 'ws_ci_cd', label: 'CI/CD・自動化', sub: 'GitHub Actionsで自動化したい処理は？', placeholder: '例：\n・PRマージ時にテスト自動実行\n・mainへのマージ時にデプロイ\n・ブランチガード（ソースブランチ制限）', section: 'repo_mgmt', rows: 3 },
+];
+
+const ANSWER_EXAMPLE = {
+    ws_team: '商材開発チーム（研修スライド管理プロジェクト）',
+    ws_members: '6名（Git経験者1名、GitHub初心者5名）\nリーダー: 杉田\nメンバー: たから、さくもと、なかべっぷ、他2名',
+    ws_goal: '【現状の課題】\n・研修スライド（PPTX）をローカルやGoogle Driveでバラバラに管理\n・誰がいつ何を変更したか追跡できない\n・同じファイルを複数人が編集して上書き事故が発生\n\n【導入目的】\n・変更履歴の可視化と追跡\n・チームでの同時編集を安全に行う\n・レビュープロセスの導入による品質向上',
+    ws_repo_structure: 'モノレポ構成（1リポジトリで全コース管理）\n\ntraining-slide-generator/\n├── courses/（各コースのスライド）\n├── docs/（ドキュメント・議事録）\n├── potx_templates/（テンプレート）\n└── .github/workflows/（CI設定）',
+    ws_branch_strategy: 'GitHub Flow ベース\n\n・main: 本番（確定版スライド）\n・dev: 開発統合（確認用）\n・feature/*: 機能・修正ブランチ\n\nフロー: feature → dev（PR） → main（PR）\n※ mainへのPRはdevからのみ許可',
+    ws_commit_rules: 'プレフィックス規約:\n・update: スライド内容の更新\n・fix: 誤字脱字・バグ修正\n・docs: ドキュメント追加・修正\n・ci: CI/CD設定変更\n\n形式: プレフィックス: 変更内容の要約\n例: update: 自然言語処理コース Day2スライド更新\n粒度: 1コース・1作業単位でコミット',
+    ws_pr_flow: '1. devからfeatureブランチを作成\n2. 作業完了後、devへPR作成\n3. PRテンプレートに変更概要を記入\n4. レビュアー1名以上が確認・Approve\n5. Approveされたらマージ\n6. 定期的にdevからmainへPR（リリース）',
+    ws_review_policy: '観点:\n・スライドの内容に誤りがないか\n・テンプレート・書式が統一されているか\n・コミットメッセージが規約に沿っているか\n\n担当: チームメンバーの持ち回り（PRごとに指名）\n期限: PR作成から48時間以内にレビュー完了',
+    ws_issue_management: 'ラベル設計:\n・スライド修正 / 新規コース / ドキュメント / インフラ\n・優先度: high / medium / low\n\nProjectボード: 「商材グループプロジェクト」でカンバン管理\nカラム: Todo → In Progress → Review → Done\n\nIssueとPRの紐づけ: 「Closes #番号」で自動クローズ',
+    ws_conflict_policy: '・featureブランチ作成者がコンフリクト解消の責任を持つ\n・PPTXファイル（バイナリ）はGitで自動マージ不可なので、作業前にチームで担当を確認\n・週1回devからpullして差分を最小化\n・解決が難しい場合はSlackでチームに相談',
+    ws_branch_protection: 'main:\n・直接push禁止\n・PR必須（devからのみ）\n・レビュー承認1名以上必須\n・check-source-branch CIチェック必須\n\ndev:\n・直接push禁止\n・PR必須\n・レビュー承認1名以上必須',
+    ws_gitignore: '・.DS_Store（macOSシステムファイル）\n・Thumbs.db（Windowsサムネイル）\n・.env（環境変数）\n・*.tmp（一時ファイル）\n・~$*.pptx（PowerPoint一時ファイル）\n・node_modules/\n・__pycache__/',
+    ws_lfs: '対象ファイル:\n・*.pptx（研修スライド）→ 主要管理対象\n・*.pdf（配布資料）\n・*.xlsx（ワークシート）\n\n理由: PPTXは1ファイル数MBになるため、Git LFSで管理しないとリポジトリが肥大化する',
+    ws_ci_cd: '・Branch Guard: mainへのPRはdevからのみ許可（branch-guard.yml）\n・将来的に: スライドPDF自動生成、リンク切れチェック\n・Dependabot: 依存パッケージの脆弱性通知',
+};
+
+let worksheetBuilt = false;
+let showingAnswer = false;
+
+function buildWorksheetPanel() {
+    if (worksheetBuilt) return;
+    worksheetBuilt = true;
+    const panel = document.getElementById('worksheetPanel');
+    const saved = getWorksheetData();
+
+    let html = '<div class="panel-header">GitHub運用設計ワークシート';
+    html += '<button style="margin-left:12px;padding:4px 12px;border:1px solid #4DA6C9;background:rgba(77,166,201,0.1);color:#4DA6C9;border-radius:6px;cursor:pointer;font-size:12px;" onclick="toggleAnswerExample()">回答例</button>';
+    html += '<button class="panel-close" onclick="closeAllPanels()">&times;</button></div>';
+    html += '<div class="panel-body" id="worksheetBody" style="padding:12px 16px;">';
+
+    let currentSection = '';
+    CANVAS_FIELDS.forEach(f => {
+        if (f.section !== currentSection) {
+            currentSection = f.section;
+            html += '<div style="margin:' + (f.section === 'overview' ? '0' : '18px') + ' 0 8px 0;padding:6px 10px;background:linear-gradient(135deg,#1B3A5C,#2E6BA6);color:#fff;border-radius:6px;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:space-between;">';
+            html += '<span>' + WS_SECTION_LABELS[f.section] + '</span>';
+            html += '<button class="feedback-btn" id="fbBtn_' + f.section + '" onclick="requestSectionFeedback(\'' + f.section + '\')">';
+            html += 'AI\u30d5\u30a3\u30fc\u30c9\u30d0\u30c3\u30af</button>';
+            html += '</div>';
+            html += '<div class="feedback-area" id="fbArea_' + f.section + '"></div>';
+        }
+        html += '<div style="margin-bottom:10px;">';
+        html += '<label style="display:block;font-size:13px;font-weight:700;color:#1B3A5C;margin-bottom:2px;">' + f.label + '</label>';
+        if (f.sub) html += '<div style="font-size:11px;color:#888;margin-bottom:3px;">' + f.sub + '</div>';
+        html += '<textarea id="' + f.id + '" rows="' + f.rows + '" placeholder="' + f.placeholder + '" style="width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:inherit;resize:vertical;line-height:1.5;transition:border-color 0.2s;" onfocus="this.style.borderColor=\'#4DA6C9\'" onblur="this.style.borderColor=\'#ddd\';autoSaveWorksheet()">' + (saved[f.id] || '') + '</textarea>';
+        html += '<div id="' + f.id + '_answer" style="display:none;margin-top:4px;padding:8px 10px;background:#f0f8ff;border-left:3px solid #4DA6C9;border-radius:4px;font-size:12px;color:#333;white-space:pre-wrap;line-height:1.5;"></div>';
+        html += '</div>';
+    });
+
+    html += '<div style="margin-top:16px;display:flex;gap:8px;">';
+    html += '<button onclick="saveWorksheetManual()" style="flex:1;padding:10px;background:#1B3A5C;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;">保存</button>';
+    html += '<button onclick="clearWorksheet()" style="padding:10px 16px;background:#fff;color:#e74c3c;border:1px solid #e74c3c;border-radius:8px;font-size:13px;cursor:pointer;">クリア</button>';
+    html += '</div>';
+    html += '<button class="overall-feedback-btn" id="fbBtnOverall" onclick="requestOverallFeedback()">AI\u306b\u3088\u308b\u7dcf\u5408\u30d5\u30a3\u30fc\u30c9\u30d0\u30c3\u30af</button>';
+    html += '<div class="feedback-area" id="fbAreaOverall"></div>';
+    html += '<div id="wsStatus" style="text-align:center;font-size:12px;color:#888;margin-top:8px;"></div>';
+    html += '<p style="margin-top:12px;font-size:11px;color:#aaa;text-align:center;">※ 実際のプロジェクトを想定して記入してみましょう。</p>';
+    html += '</div>';
+
+    panel.innerHTML = html;
+}
+
+function autoSaveWorksheet() {
+    const data = {};
+    CANVAS_FIELDS.forEach(f => {
+        const el = document.getElementById(f.id);
+        if (el) data[f.id] = el.value;
+    });
+    saveWorksheetData(data);
+    if (typeof Analytics !== 'undefined' && Analytics.log) {
+        Analytics.log('worksheet_save', { fields_filled: Object.values(data).filter(v => v.trim()).length, total_fields: CANVAS_FIELDS.length });
+    }
+}
+
+function saveWorksheetManual() {
+    autoSaveWorksheet();
+    const status = document.getElementById('wsStatus');
+    if (status) { status.textContent = '保存しました (' + new Date().toLocaleTimeString() + ')'; setTimeout(() => { status.textContent = ''; }, 3000); }
+}
+
+function clearWorksheet() {
+    if (!confirm('ワークシートの内容をクリアします。よろしいですか？')) return;
+    CANVAS_FIELDS.forEach(f => { const el = document.getElementById(f.id); if (el) el.value = ''; });
+    saveWorksheetData({});
+    const status = document.getElementById('wsStatus');
+    if (status) { status.textContent = 'クリアしました'; setTimeout(() => { status.textContent = ''; }, 3000); }
+}
+
+function toggleAnswerExample() {
+    showingAnswer = !showingAnswer;
+    CANVAS_FIELDS.forEach(f => {
+        const el = document.getElementById(f.id + '_answer');
+        if (el) {
+            if (showingAnswer) {
+                el.textContent = ANSWER_EXAMPLE[f.id] || '';
+                el.style.display = 'block';
+            } else {
+                el.style.display = 'none';
+            }
+        }
+    });
+}
+
+// =============================================
+// AI Feedback — Claude APIによるフィードバック
+// =============================================
+const feedbackCache = {};
+
+async function requestSectionFeedback(section) {
+    const btn = document.getElementById('fbBtn_' + section);
+    const area = document.getElementById('fbArea_' + section);
+    if (!btn || !area) return;
+    if (!functions) { area.innerHTML = '<div class="fb-header" style="color:#e74c3c;">エラー</div>Firebase未接続のためフィードバックを取得できません。'; area.classList.add('visible'); return; }
+
+    const worksheetData = getWorksheetData();
+    const cacheKey = section + '_' + JSON.stringify(CANVAS_FIELDS.filter(f => f.section === section).map(f => worksheetData[f.id] || ''));
+    if (feedbackCache[cacheKey]) {
+        area.innerHTML = '<div class="fb-header">AIフィードバック（' + WS_SECTION_LABELS[section] + '）</div>' + feedbackCache[cacheKey];
+        area.classList.add('visible');
+        return;
+    }
+
+    const sectionFields = CANVAS_FIELDS.filter(f => f.section === section);
+    const filledCount = sectionFields.filter(f => (worksheetData[f.id] || '').trim()).length;
+    if (filledCount === 0) {
+        area.innerHTML = '<div class="fb-header">入力なし</div>このセクションにはまだ回答がありません。回答を入力してからフィードバックを取得してください。';
+        area.classList.add('visible');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="fb-spinner"></span> 分析中...';
+
+    try {
+        const callable = functions.httpsCallable('getSectionFeedback');
+        const result = await callable({ section: section, answers: worksheetData, userId: localStorage.getItem('ghcourse_user_id') || 'anonymous' });
+        const feedbackText = formatFeedback(result.data.feedback);
+        feedbackCache[cacheKey] = feedbackText;
+        area.innerHTML = '<div class="fb-header">AIフィードバック（' + WS_SECTION_LABELS[section] + '）</div>' + feedbackText;
+        area.classList.add('visible');
+        if (typeof Analytics !== 'undefined' && Analytics.log) Analytics.log('ai_feedback', { type: 'section', section: section, fields_filled: filledCount });
+    } catch (error) {
+        area.innerHTML = '<div class="fb-header" style="color:#e74c3c;">エラー</div>' + getAIErrorMessage(error);
+        area.classList.add('visible');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'AIフィードバック';
+    }
+}
+
+async function requestOverallFeedback() {
+    const btn = document.getElementById('fbBtnOverall');
+    const area = document.getElementById('fbAreaOverall');
+    if (!btn || !area) return;
+    if (!functions) { area.innerHTML = '<div class="fb-header" style="color:#e74c3c;">エラー</div>Firebase未接続のためフィードバックを取得できません。'; area.classList.add('visible'); return; }
+
+    const worksheetData = getWorksheetData();
+    const cacheKey = 'overall_' + JSON.stringify(CANVAS_FIELDS.map(f => worksheetData[f.id] || ''));
+    if (feedbackCache[cacheKey]) {
+        area.innerHTML = '<div class="fb-header">総合フィードバック</div>' + feedbackCache[cacheKey];
+        area.classList.add('visible');
+        return;
+    }
+
+    const filledCount = CANVAS_FIELDS.filter(f => (worksheetData[f.id] || '').trim()).length;
+    if (filledCount < 3) {
+        area.innerHTML = '<div class="fb-header">入力不足</div>総合フィードバックには最低3つ以上のフィールドに回答が必要です。（' + filledCount + '/14 記入済み）';
+        area.classList.add('visible');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'AIが分析中...';
+
+    try {
+        const callable = functions.httpsCallable('getOverallFeedback');
+        const result = await callable({ answers: worksheetData, userId: localStorage.getItem('ghcourse_user_id') || 'anonymous' });
+        const feedbackText = formatFeedback(result.data.feedback);
+        feedbackCache[cacheKey] = feedbackText;
+        area.innerHTML = '<div class="fb-header">総合フィードバック</div>' + feedbackText;
+        area.classList.add('visible');
+        if (typeof Analytics !== 'undefined' && Analytics.log) Analytics.log('ai_feedback', { type: 'overall', fields_filled: filledCount });
+    } catch (error) {
+        area.innerHTML = '<div class="fb-header" style="color:#e74c3c;">エラー</div>' + getAIErrorMessage(error);
+        area.classList.add('visible');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'AIによる総合フィードバック';
+    }
+}
+
+function formatFeedback(text) {
+    return text
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\n/g, '<br>');
+}
+
+function getAIErrorMessage(error) {
+    if (error.code === 'resource-exhausted') return 'リクエスト制限に達しました。しばらく待ってから再試行してください。';
+    if (error.code === 'unavailable' || error.message.includes('network')) return 'サービスに接続できません。ネットワーク接続を確認してください。';
+    if (error.code === 'failed-precondition') return error.message;
+    return 'フィードバックの取得に失敗しました。もう一度お試しください。';
 }
 
 // =============================================
@@ -1955,6 +2219,7 @@ const Analytics = (() => {
             session_info: sessionInfo || {},
             events: sessionEvents,
             summary: buildSummaryData(sessionEvents),
+            worksheet: getWorksheetData(),
             synced_at: new Date().toISOString(),
             sync_trigger: trigger,
             course: 'GitHub基礎実践コース'
